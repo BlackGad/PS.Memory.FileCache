@@ -44,13 +44,14 @@ namespace PS.Runtime.Caching
 
         #region Constructors
 
-        public FileCache(string name,
+        public FileCache(string name = null,
                          IRepository repository = null,
                          IDataSerializer serializer = null,
                          IMemoryCacheFacade memoryCacheFacade = null,
                          CleanupSettings cleanupSettings = null)
         {
             Name = name;
+
             DefaultCacheCapabilities = DefaultCacheCapabilities.AbsoluteExpirations |
                                        DefaultCacheCapabilities.SlidingExpirations |
                                        DefaultCacheCapabilities.InMemoryProvider |
