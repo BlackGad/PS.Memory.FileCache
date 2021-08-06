@@ -134,7 +134,7 @@ namespace PS.Runtime.Caching
 
         public override object AddOrGetExisting(string key, object value, CacheItemPolicy policy, string regionName = null)
         {
-            return AddOrGetExisting(new CacheItem(key, value, regionName), policy);
+            return AddOrGetExisting(new CacheItem(key, value, regionName), policy).Value;
         }
 
         public override object Get(string key, string regionName = null)
