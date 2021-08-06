@@ -121,28 +121,9 @@ namespace PS.Runtime.Caching.Default
 
             var directory = GetKeyDirectory(key, region);
             var filePath = Path.Combine(directory, filename);
-            Exception error = null;
-            for (var i = 0; i < 3; i++)
-            {
-                try
-                {
-                    EnsureMetadata(key, region);
 
-                    WriteBytesToFile(filePath, bytes);
-
-                    return;
-                }
-                catch (IOException e)
-                {
-                    error = e;
-                    Thread.Sleep(TimeSpan.FromSeconds(1));
-                }
-            }
-
-            if (error != null)
-            {
-                throw error;
-            }
+            RetryPolicy(() => EnsureMetadata(key, region), 3, TimeSpan.FromMilliseconds(500));
+            RetryPolicy(() => WriteBytesToFile(filePath, bytes), 3, TimeSpan.FromSeconds(1000));
         }
 
         public virtual void UpdateLastAccessTime(string key, string region, string filename, DateTime time)
@@ -191,6 +172,7 @@ namespace PS.Runtime.Caching.Default
 
         protected virtual void EnsureMetadata(string key, string region)
         {
+            //Prevent multiple parallel keys write access
             lock (this)
             {
                 var regionDirectory = GetRegionDirectory(region);
@@ -287,6 +269,31 @@ namespace PS.Runtime.Caching.Default
             }
 
             File.Move(intermediatePath, filePath);
+        }
+
+        private void RetryPolicy(Action action, int attempts, TimeSpan sleep)
+        {
+            if (action == null) throw new ArgumentNullException(nameof(action));
+            Exception error = null;
+            for (var i = 0; i < attempts; i++)
+            {
+                try
+                {
+                    action();
+
+                    return;
+                }
+                catch (IOException e)
+                {
+                    error = e;
+                    Thread.Sleep(sleep);
+                }
+            }
+
+            if (error != null)
+            {
+                throw error;
+            }
         }
 
         #endregion
