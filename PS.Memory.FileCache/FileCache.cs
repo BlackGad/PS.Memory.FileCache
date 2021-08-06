@@ -39,6 +39,8 @@ namespace PS.Runtime.Caching
         private readonly TimeSpan? _cleanupPeriod;
         private readonly TimeSpan? _guarantyFileLifetimePeriod;
         private readonly IMemoryCacheFacade _memoryCacheFacade;
+
+        private readonly IRepository _repository;
         private readonly IDataSerializer _serializer;
         private readonly Timer _timer;
 
@@ -57,8 +59,8 @@ namespace PS.Runtime.Caching
                                        DefaultCacheCapabilities.InMemoryProvider |
                                        DefaultCacheCapabilities.CacheRegions;
 
-            Repository = repository ?? new DefaultRepository();
-            _memoryCacheFacade = memoryCacheFacade ?? new DefaultMemoryCacheFacade(TimeSpan.FromMinutes(10));
+            _repository = repository ?? new DefaultRepository();
+            _memoryCacheFacade = memoryCacheFacade ?? new DefaultMemoryCacheFacade();
             _serializer = serializer ?? new DefaultDataSerializer();
 
             cleanupSettings = cleanupSettings ?? new CleanupSettings();
@@ -86,8 +88,6 @@ namespace PS.Runtime.Caching
 
         public override string Name { get; }
 
-        public IRepository Repository { get; }
-
         #endregion
 
         #region Override members
@@ -99,7 +99,7 @@ namespace PS.Runtime.Caching
                 //Update access time only for items with sliding expiration
                 if (item.Policy.SlidingExpiration != NoSlidingExpiration)
                 {
-                    Repository.UpdateLastAccessTime(key, regionName, item.Origin, DateTime.UtcNow);
+                    _repository.UpdateLastAccessTime(key, regionName, item.Origin, DateTime.UtcNow);
                 }
 
                 return item.CacheItem;
@@ -197,11 +197,11 @@ namespace PS.Runtime.Caching
 
             var data = _serializer.SerializeItem(item);
 
-            Repository.WriteFile(item.Key, item.RegionName, origin, data);
+            _repository.WriteFile(item.Key, item.RegionName, origin, data);
 
             if (policy.SlidingExpiration != NoSlidingExpiration)
             {
-                Repository.UpdateLastAccessTime(item.Key, item.RegionName, origin, now);
+                _repository.UpdateLastAccessTime(item.Key, item.RegionName, origin, now);
             }
 
             var expiration = CalculateExpiration(policy, now);
@@ -213,7 +213,7 @@ namespace PS.Runtime.Caching
             var existingItem = GetInternalCacheItem(key, regionName);
             if (existingItem == null || existingItem.Policy.Priority == CacheItemPriority.NotRemovable) return null;
 
-            Repository.MarkAsDeleted(key, regionName, existingItem.Origin);
+            _repository.MarkAsDeleted(key, regionName, existingItem.Origin);
 
             _memoryCacheFacade.Remove(key, regionName);
 
@@ -242,21 +242,25 @@ namespace PS.Runtime.Caching
             try
             {
                 var now = DateTime.UtcNow;
-                var regions = Repository.EnumerateRegions();
+                var regions = _repository.EnumerateRegions();
                 var guarantyFileLifetimePeriod = _guarantyFileLifetimePeriod ?? TimeSpan.Zero;
                 foreach (var region in regions)
                 {
-                    foreach (var key in Repository.EnumerateKeys(region))
+                    foreach (var key in _repository.EnumerateKeys(region))
                     {
                         var files = ScanForFiles(key, region);
                         var entry = SelectValidCacheEntry(key, region, files, now);
                         var obsoleteFiles = files.Except(new[] { entry })
-                                                 .Where(f => f.Timestamp + guarantyFileLifetimePeriod < now)
+                                                 .Where(f =>
+                                                 {
+                                                     var lastAccessTime = _repository.GetLastAccessTime(key, region, f.File);
+                                                     return lastAccessTime + guarantyFileLifetimePeriod < now;
+                                                 })
                                                  .Select(f => f.File)
                                                  .ToList();
                         if (obsoleteFiles.Any())
                         {
-                            Repository.DeleteFiles(key, region, obsoleteFiles);
+                            _repository.DeleteFiles(key, region, obsoleteFiles);
                         }
                     }
                 }
@@ -272,11 +276,11 @@ namespace PS.Runtime.Caching
         /// </summary>
         public void Reset()
         {
-            var regions = Repository.EnumerateRegions();
+            var regions = _repository.EnumerateRegions();
 
             foreach (var region in regions)
             {
-                foreach (var key in Repository.EnumerateKeys(region))
+                foreach (var key in _repository.EnumerateKeys(region))
                 {
                     Remove(key, region);
                 }
@@ -305,12 +309,12 @@ namespace PS.Runtime.Caching
                     return null;
                 }
 
-                var data = Repository.ReadFile(key, regionName, entry.File);
+                var data = _repository.ReadFile(key, regionName, entry.File);
                 var cacheItem = _serializer.DeserializeItem(data);
 
                 if (entry.Policy.SlidingExpiration != NoSlidingExpiration)
                 {
-                    Repository.UpdateLastAccessTime(key, regionName, entry.File, now);
+                    _repository.UpdateLastAccessTime(key, regionName, entry.File, now);
                 }
 
                 var expiration = CalculateExpiration(entry.Policy, now);
@@ -332,12 +336,12 @@ namespace PS.Runtime.Caching
 
         private IEnumerable<string> GetKeys(string regionName)
         {
-            return Repository.EnumerateKeys(regionName);
+            return _repository.EnumerateKeys(regionName);
         }
 
         private IReadOnlyList<FileEntry> ScanForFiles(string key, string regionName)
         {
-            return Repository.EnumerateFiles(key, regionName, "*." + FileEntry.CacheExtension).Select(FileEntry.Parse).ToList();
+            return _repository.EnumerateFiles(key, regionName, "*." + FileEntry.CacheExtension).Select(FileEntry.Parse).ToList();
         }
 
         private FileEntry SelectValidCacheEntry(string key, string regionName, IReadOnlyList<FileEntry> files, DateTime now)
@@ -349,7 +353,7 @@ namespace PS.Runtime.Caching
                 return null;
             }
 
-            if (Repository.IsDeleted(key, regionName, entry.File))
+            if (_repository.IsDeleted(key, regionName, entry.File))
             {
                 //Data file marked as deleted
                 return null;
@@ -359,7 +363,7 @@ namespace PS.Runtime.Caching
 
             if (entry.Policy.SlidingExpiration != NoSlidingExpiration)
             {
-                lastAccessTime = Repository.GetLastAccessTime(key, regionName, entry.File);
+                lastAccessTime = _repository.GetLastAccessTime(key, regionName, entry.File);
             }
 
             var expirationTime = CalculateExpiration(entry.Policy, lastAccessTime);

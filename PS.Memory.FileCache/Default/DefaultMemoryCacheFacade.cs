@@ -11,9 +11,9 @@ namespace PS.Runtime.Caching.Default
 
         #region Constructors
 
-        public DefaultMemoryCacheFacade(TimeSpan maximumItemLifetime)
+        public DefaultMemoryCacheFacade(TimeSpan? maximumItemLifetime = null)
         {
-            _maximumItemLifetime = maximumItemLifetime;
+            _maximumItemLifetime = maximumItemLifetime ?? TimeSpan.FromMinutes(10);
             _memoryCache = new MemoryCache("FileCacheFastProxy");
         }
 
