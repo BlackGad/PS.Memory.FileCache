@@ -1,4 +1,7 @@
-# PS.Memory.FileCache
+[![Build status](https://ci.appveyor.com/api/projects/status/3n68og1q7gcebk8x?svg=true)](https://ci.appveyor.com/project/BlackGad/ps-memory-filecache)
+[![NuGet version (PS.Memory.Cache)](https://img.shields.io/nuget/v/PS.Memory.FileCache.svg?style=flat-square)](https://www.nuget.org/packages/PS.Memory.FileCache/)
+
+# Description
 
 It is simple in-process file cache implementation inherited from standard [ObjectCache](https://docs.microsoft.com/en-us/dotnet/api/system.runtime.caching.objectcache?view=dotnet-plat-ext-5.0) class. FileCache is thread safe (supports multithread/multiprocessing parallel cache processing).
 
@@ -28,7 +31,7 @@ var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.New
 
 using (var cache = new FileCache(repository: repository))
 {
-	...
+   //...
 }
 ```
 
@@ -79,7 +82,7 @@ Clean operation means delete all files that were marked as deleted or expired.
 To prevent files access issues there is delay options (5 seconds by default) which means file is allowed for deletion only after specified period.
 
 ```csharp
- var cleanupSettings = new CleanupSettings
+var cleanupSettings = new CleanupSettings
 {
     GuarantyFileLifetimePeriod = null,
     CleanupPeriod = TimeSpan.MaxValue
@@ -87,6 +90,6 @@ To prevent files access issues there is delay options (5 seconds by default) whi
 
 using (var cache1 = new FileCache(cleanupSettings: cleanupSettings))
 {
-//...
+   //...
 }
 ```
