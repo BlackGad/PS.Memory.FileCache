@@ -226,7 +226,7 @@ namespace PS.Runtime.Caching
 
         public void Dispose()
         {
-            _timer.Dispose();
+            _timer?.Dispose();
             Cleanup();
         }
 
