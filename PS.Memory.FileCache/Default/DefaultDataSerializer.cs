@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.Caching;
 using System.Runtime.Serialization.Formatters.Binary;
 using PS.Runtime.Caching.API;
+using PS.Runtime.Caching.Extensions;
 
 namespace PS.Runtime.Caching.Default
 {
@@ -80,8 +81,7 @@ namespace PS.Runtime.Caching.Default
                     }
                     else
                     {
-                        var parts = type.AssemblyQualifiedName.Split(',');
-                        var qualifiedType = string.Join(",", parts.Take(2));
+                        var qualifiedType = type.GetAssemblyQualifiedName();
                         writer.Write(qualifiedType);
                     }
 
