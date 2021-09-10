@@ -1,5 +1,14 @@
+# Status
+
+## Master
+
 [![Build status](https://ci.appveyor.com/api/projects/status/3n68og1q7gcebk8x?svg=true)](https://ci.appveyor.com/project/BlackGad/ps-memory-filecache)
 [![NuGet version (PS.Memory.Cache)](https://img.shields.io/nuget/v/PS.Memory.FileCache.svg?style=flat-square)](https://www.nuget.org/packages/PS.Memory.FileCache/)
+
+## CI
+
+[![Build status](https://ci.appveyor.com/api/projects/status/5teu4584irkgnysp?svg=true)](https://ci.appveyor.com/project/BlackGad/ps-memory-filecache-s9805)
+[![MyGet version (PS.Memory.Cache)](https://img.shields.io/myget/ps-projects/v/PS.Memory.FileCache.svg?style=flat-square)](https://www.myget.org/feed/ps-projects/package/nuget/PS.Memory.FileCache)
 
 # Description
 
