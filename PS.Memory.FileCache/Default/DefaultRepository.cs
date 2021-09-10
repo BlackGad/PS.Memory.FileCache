@@ -2,38 +2,67 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Reflection;
 using System.Runtime.Caching;
-using System.Security.Cryptography;
-using System.Text;
+using System.Runtime.Serialization;
 using System.Threading;
 using PS.Runtime.Caching.API;
+using PS.Runtime.Caching.Extensions;
 
 namespace PS.Runtime.Caching.Default
 {
-    public class DefaultRepository : IRepository
+    public class DefaultRepository : IRepository,
+                                     IDisposable
     {
         #region Constants
 
-        private static readonly CacheItemPolicy DefaultPolicy;
-        private static readonly string MetadataFilename = "metadata";
+        public static readonly string CacheExtension = "cache";
 
         #endregion
 
-        private readonly MemoryCache _hashCache;
+        #region Static members
+
+        public static CacheItemPolicy DeserializeCacheItemPolicy(string filename)
+        {
+            var parts = filename.Split('.');
+            if (parts.Length != 4)
+            {
+                var message = $"Invalid filename. Expected dot separated string in format: <timestamp>.<seed>.<policy>.{CacheExtension}";
+                throw new SerializationException(message);
+            }
+
+            return parts[2].DeserializeCacheItemPolicy();
+        }
+
+        public static string SerializeCacheItemPolicy(CacheItemPolicy cacheItemPolicy)
+        {
+            var filename = string.Join(".",
+                                       DateTime.UtcNow.DateTimeToSpecial(),
+                                       Guid.NewGuid().ToString("N").Substring(0, 4),
+                                       cacheItemPolicy.SerializeCacheItemPolicy(),
+                                       CacheExtension
+            );
+            return filename;
+        }
+
+        #endregion
+
+        private readonly object _cleanupLocker;
+
+        private readonly CleanupSettings _cleanupSettings;
+
+        private readonly bool _sanitizeNames;
+        private readonly Timer _timer;
 
         #region Constructors
 
-        static DefaultRepository()
+        public DefaultRepository(string root = null, bool sanitizeNames = true, CleanupSettings cleanupSettings = null)
         {
-            DefaultPolicy = new CacheItemPolicy
-            {
-                SlidingExpiration = TimeSpan.FromMinutes(5)
-            };
-        }
+            _sanitizeNames = sanitizeNames;
+            _cleanupSettings = cleanupSettings ?? CleanupSettings.Default;
+            _cleanupLocker = new object();
 
-        public DefaultRepository(string root = null)
-        {
             if (root == null)
             {
                 var entryLocation = Assembly.GetExecutingAssembly().Location;
@@ -45,210 +74,292 @@ namespace PS.Runtime.Caching.Default
                 Root = root;
             }
 
-            _hashCache = new MemoryCache("Hash cache");
+            if (_cleanupSettings.CleanupPeriod != TimeSpan.MaxValue)
+            {
+                _timer = new Timer(CleanupTimer, null, TimeSpan.Zero, TimeSpan.Zero);
+            }
         }
 
         #endregion
 
         #region Properties
 
-        public string Root { get; }
+        protected string Root { get; }
+
+        #endregion
+
+        #region IDisposable Members
+
+        public void Dispose()
+        {
+            if (_timer != null)
+            {
+                _timer.Dispose();
+                Cleanup();
+            }
+        }
 
         #endregion
 
         #region IRepository Members
 
-        public virtual void DeleteFiles(string key, string region, IReadOnlyList<string> files)
-        {
-            if (key == null) throw new ArgumentNullException(nameof(key));
-            var directory = GetKeyDirectory(key, region);
-            foreach (var file in files)
-            {
-                File.Delete(Path.Combine(directory, file));
-            }
-        }
-
-        public virtual IEnumerable<string> EnumerateFiles(string key, string region, string pattern)
-        {
-            if (key == null) throw new ArgumentNullException(nameof(key));
-            var directory = GetKeyDirectory(key, region);
-
-            return Directory.Exists(directory)
-                ? Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly)
-                           .Select(Path.GetFileName)
-                           .Where(f => !string.Equals(f, MetadataFilename))
-                : Enumerable.Empty<string>().ToList();
-        }
-
         public virtual IEnumerable<string> EnumerateKeys(string region)
         {
-            var regionDirectory = GetRegionDirectory(region);
-            if (!Directory.Exists(regionDirectory)) yield break;
+            var regionDirectory = new DirectoryInfo(GetRegionDirectory(region));
 
-            var directories = Directory.EnumerateDirectories(regionDirectory, "*", SearchOption.TopDirectoryOnly);
+            if (!regionDirectory.Exists) yield break;
+            var directories = regionDirectory.EnumerateDirectories("*", SearchOption.TopDirectoryOnly);
             foreach (var directory in directories)
             {
-                var file = Path.Combine(directory, MetadataFilename);
-                if (File.Exists(file)) yield return Encoding.UTF8.GetString(ReadBytesFromFile(file));
+                var name = directory.Name;
+                if (_sanitizeNames)
+                {
+                    name = WebUtility.UrlDecode(name);
+                }
+
+                yield return name;
             }
         }
 
         public virtual IEnumerable<string> EnumerateRegions()
         {
-            if (!Directory.Exists(Root)) yield break;
+            var rootDirectory = new DirectoryInfo(Root);
+            if (!rootDirectory.Exists) yield break;
 
-            var directories = Directory.EnumerateDirectories(Root, "*", SearchOption.TopDirectoryOnly);
+            var directories = rootDirectory.EnumerateDirectories("*", SearchOption.TopDirectoryOnly);
             foreach (var directory in directories)
             {
-                var file = Path.Combine(directory, MetadataFilename);
-                if (File.Exists(file)) yield return Encoding.UTF8.GetString(ReadBytesFromFile(file));
+                var name = directory.Name;
+                if (_sanitizeNames)
+                {
+                    name = WebUtility.UrlDecode(name);
+                }
+
+                yield return name;
             }
         }
 
-        public virtual byte[] ReadFile(string key, string region, string filename)
+        public virtual void Delete(ICacheEntry entry)
         {
-            if (key == null) throw new ArgumentNullException(nameof(key));
+            var cacheEntry = CastEntry(entry);
+            cacheEntry.File.Refresh();
 
-            var directory = GetKeyDirectory(key, region);
-            var filePath = Path.Combine(directory, filename);
-
-            return ReadBytesFromFile(filePath);
+            if (cacheEntry.File.Exists)
+            {
+                cacheEntry.File.Attributes = FileAttributes.Offline;
+            }
         }
 
-        public virtual void WriteFile(string key, string region, string filename, byte[] bytes = null)
+        public virtual ICacheEntry Read(string key, string region, DateTime time)
         {
-            if (key == null) throw new ArgumentNullException(nameof(key));
-
             var directory = GetKeyDirectory(key, region);
-            var filePath = Path.Combine(directory, filename);
+            if (!Directory.Exists(directory))
+            {
+                return null;
+            }
 
-            RetryPolicy(() => EnsureMetadata(key, region), 3, TimeSpan.FromMilliseconds(500));
-            RetryPolicy(() => WriteBytesToFile(filePath, bytes), 3, TimeSpan.FromSeconds(1000));
+            var pattern = $"*.*.{CacheExtension}";
+            var mostRecentFile = Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly)
+                                          .OrderByDescending(s => s)
+                                          .FirstOrDefault();
+            if (mostRecentFile == null)
+            {
+                //Data file missed
+                return null;
+            }
+
+            var file = new FileInfo(mostRecentFile);
+            if (file.Attributes.HasFlag(FileAttributes.Offline))
+            {
+                //Data file marked as deleted
+                return null;
+            }
+
+            var policy = DeserializeCacheItemPolicy(file.Name);
+
+            var now = DateTime.UtcNow;
+            var lastAccessTime = policy.SlidingExpiration != ObjectCache.NoSlidingExpiration
+                ? file.LastAccessTimeUtc
+                : now;
+
+            var expirationTime = policy.CalculateExpiration(lastAccessTime);
+            if (expirationTime < now)
+            {
+                //Item expired
+                return null;
+            }
+
+            var bytes = ReadBytesFromFile(file);
+            return new CacheEntry(file, bytes, policy);
         }
 
-        public virtual void UpdateLastAccessTime(string key, string region, string filename, DateTime time)
+        public virtual void UpdateAccessTime(ICacheEntry entry, DateTime time)
         {
-            if (key == null) throw new ArgumentNullException(nameof(key));
+            var cacheEntry = CastEntry(entry);
+            cacheEntry.File.Refresh();
 
-            var directory = GetKeyDirectory(key, region);
-            var filePath = Path.Combine(directory, filename);
-
-            File.SetLastAccessTimeUtc(filePath, time);
+            if (cacheEntry.File.Exists)
+            {
+                cacheEntry.File.LastAccessTimeUtc = time;
+            }
         }
 
-        public virtual DateTime GetLastAccessTime(string key, string region, string filename)
+        public virtual ICacheEntry Write(string key, string region, byte[] bytes, CacheItemPolicy cacheItemPolicy)
         {
-            if (key == null) throw new ArgumentNullException(nameof(key));
-
             var directory = GetKeyDirectory(key, region);
-            var filePath = Path.Combine(directory, filename);
+            var filename = SerializeCacheItemPolicy(cacheItemPolicy);
 
-            return File.GetLastAccessTimeUtc(filePath);
+            var file = new FileInfo(Path.Combine(directory, filename));
+            if (file.Directory?.Exists == false)
+            {
+                file.Directory.Create();
+            }
+
+            RetryPolicy(() => WriteBytesToFile(file, bytes), 3, TimeSpan.FromSeconds(1));
+
+            return new CacheEntry(file, bytes, cacheItemPolicy);
         }
 
-        public virtual void MarkAsDeleted(string key, string region, string filename)
+        public virtual void Cleanup()
         {
-            if (key == null) throw new ArgumentNullException(nameof(key));
+            lock (_cleanupLocker)
+            {
+                try
+                {
+                    var now = DateTime.UtcNow;
+                    var regions = EnumerateRegions();
+                    var guarantyFileLifetimePeriod = _cleanupSettings.GuarantyFileLifetimePeriod;
+                    foreach (var region in regions)
+                    {
+                        var regionDirectory = GetRegionDirectory(region);
+                        foreach (var key in EnumerateKeys(region))
+                        {
+                            var keyDirectory = GetKeyDirectory(key, region);
+                            if (!Directory.Exists(keyDirectory))
+                            {
+                                continue;
+                            }
 
-            var directory = GetKeyDirectory(key, region);
-            var filePath = Path.Combine(directory, filename);
+                            var pattern = $"*.*.{CacheExtension}";
+                            var files = Directory.EnumerateFiles(keyDirectory, pattern, SearchOption.TopDirectoryOnly)
+                                                 .OrderByDescending(s => s)
+                                                 .ToList();
 
-            File.SetAttributes(filePath, FileAttributes.Offline);
-        }
+                            var mostRecentFile = files.FirstOrDefault();
+                            if (mostRecentFile == null)
+                            {
+                                continue;
+                            }
 
-        public virtual bool IsDeleted(string key, string region, string filename)
-        {
-            if (key == null) throw new ArgumentNullException(nameof(key));
+                            var obsoleteFiles = files.Skip(1).ToList();
 
-            var directory = GetKeyDirectory(key, region);
-            var filePath = Path.Combine(directory, filename);
+                            var file = new FileInfo(mostRecentFile);
+                            if (file.Attributes.HasFlag(FileAttributes.Offline))
+                            {
+                                obsoleteFiles.Add(file.FullName);
+                            }
 
-            return File.GetAttributes(filePath).HasFlag(FileAttributes.Offline);
+                            var policy = DeserializeCacheItemPolicy(file.Name);
+
+                            var lastAccessTime = policy.SlidingExpiration != ObjectCache.NoSlidingExpiration
+                                ? file.LastAccessTimeUtc
+                                : now;
+
+                            var expirationTime = policy.CalculateExpiration(lastAccessTime);
+                            if (expirationTime + guarantyFileLifetimePeriod < now)
+                            {
+                                //Item expired
+                                obsoleteFiles.Add(file.FullName);
+                            }
+
+                            if (obsoleteFiles.Any())
+                            {
+                                foreach (var obsoleteFile in obsoleteFiles)
+                                {
+                                    CleanupFile(obsoleteFile);
+                                }
+                            }
+
+                            CleanupDirectory(keyDirectory);
+                        }
+
+                        CleanupDirectory(regionDirectory);
+                    }
+                }
+                catch
+                {
+                    //Nothing
+                }
+            }
         }
 
         #endregion
 
         #region Members
 
-        protected virtual void EnsureMetadata(string key, string region)
+        protected virtual CacheEntry CastEntry(ICacheEntry entry)
         {
-            //Prevent multiple parallel keys write access
-            lock (this)
+            if (entry is CacheEntry cacheEntry)
             {
-                var regionDirectory = GetRegionDirectory(region);
-                if (!Directory.Exists(regionDirectory))
-                {
-                    Directory.CreateDirectory(regionDirectory);
-                }
+                return cacheEntry;
+            }
 
-                var regionMetadataFilePath = Path.Combine(regionDirectory, MetadataFilename);
-                if (!File.Exists(regionMetadataFilePath))
-                {
-                    var bytes = string.IsNullOrEmpty(region) ? null : Encoding.UTF8.GetBytes(region);
-                    WriteBytesToFile(regionMetadataFilePath, bytes);
-                }
+            throw new InvalidCastException($"Current repository cache entries must be inherited from {typeof(CacheEntry)}");
+        }
 
-                var keyDirectory = GetKeyDirectory(key, region);
-                if (!Directory.Exists(keyDirectory))
+        protected virtual void CleanupDirectory(string directory)
+        {
+            try
+            {
+                var remainingFiles = Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly);
+                if (!remainingFiles.Any())
                 {
-                    Directory.CreateDirectory(keyDirectory);
+                    Directory.Delete(directory);
                 }
+            }
+            catch
+            {
+                //Nothing
+            }
+        }
 
-                var keyMetadataFilePath = Path.Combine(keyDirectory, MetadataFilename);
-                if (!File.Exists(keyMetadataFilePath))
-                {
-                    WriteBytesToFile(keyMetadataFilePath, Encoding.UTF8.GetBytes(key));
-                }
+        protected virtual void CleanupFile(string file)
+        {
+            try
+            {
+                File.Delete(file);
+            }
+            catch
+            {
+                //Nothing
             }
         }
 
         protected virtual string GetKeyDirectory(string key, string regionName)
         {
-            return Path.Combine(GetRegionDirectory(regionName), Hash(key));
+            if (_sanitizeNames)
+            {
+                key = WebUtility.UrlEncode(key) ?? key;
+            }
+
+            return Path.Combine(GetRegionDirectory(regionName), key);
         }
 
         protected virtual string GetRegionDirectory(string regionName)
         {
-            var regionHash = string.IsNullOrEmpty(regionName)
-                ? "00000000000000000000000000000042"
-                : Hash(regionName);
+            regionName = string.IsNullOrWhiteSpace(regionName) ? "Default" : regionName;
 
-            return Path.Combine(Root, regionHash);
+            if (_sanitizeNames)
+            {
+                regionName = WebUtility.UrlEncode(regionName) ?? regionName;
+            }
+
+            return Path.Combine(Root, regionName);
         }
 
-        protected virtual string Hash(string input)
+        protected virtual byte[] ReadBytesFromFile(FileInfo file)
         {
-            if (input == null)
-            {
-                input = "1DB24525-F535-4217-81AF-CBC952244DC1";
-            }
-
-            if (input.Length == 0)
-            {
-                input = "D7676DF9-79ED-45C6-876B-B7E5DFECAEE7";
-            }
-
-            if (_hashCache[input] is string result)
-            {
-                return result;
-            }
-
-            // Use input string to calculate MD5 hash
-            using (var md5 = MD5.Create())
-            {
-                var inputBytes = Encoding.UTF8.GetBytes(input);
-                var hashBytes = md5.ComputeHash(inputBytes);
-
-                var hash = BitConverter.ToString(hashBytes).Replace("-", string.Empty);
-                var cacheItem = new CacheItem(input, hash);
-                _hashCache.Add(cacheItem, DefaultPolicy);
-                return hash;
-            }
-        }
-
-        protected virtual byte[] ReadBytesFromFile(string filePath)
-        {
-            using (var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var stream = file.Open(FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             using (var memory = new MemoryStream())
             {
                 stream.CopyTo(memory);
@@ -257,18 +368,22 @@ namespace PS.Runtime.Caching.Default
             }
         }
 
-        protected virtual void WriteBytesToFile(string filePath, byte[] bytes)
+        protected virtual void WriteBytesToFile(FileInfo file, byte[] bytes)
         {
-            var intermediatePath = filePath + ".progress";
+            var intermediatePath = file.FullName + ".progress";
             using (var stream = File.Open(intermediatePath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None))
             {
-                if (bytes != null)
-                {
-                    stream.Write(bytes, 0, bytes.Length);
-                }
+                stream.Write(bytes, 0, bytes.Length);
             }
 
-            File.Move(intermediatePath, filePath);
+            File.Move(intermediatePath, file.FullName);
+            file.LastAccessTimeUtc = DateTime.UtcNow;
+        }
+
+        private void CleanupTimer(object state)
+        {
+            Cleanup();
+            _timer.Change(_cleanupSettings.CleanupPeriod, TimeSpan.Zero);
         }
 
         private void RetryPolicy(Action action, int attempts, TimeSpan sleep)
@@ -280,7 +395,6 @@ namespace PS.Runtime.Caching.Default
                 try
                 {
                     action();
-
                     return;
                 }
                 catch (IOException e)
@@ -294,6 +408,47 @@ namespace PS.Runtime.Caching.Default
             {
                 throw error;
             }
+        }
+
+        #endregion
+
+        #region Nested type: CacheEntry
+
+        public class CacheEntry : ICacheEntry
+        {
+            private CacheItem _cacheItem;
+
+            #region Constructors
+
+            public CacheEntry(FileInfo file, byte[] data, CacheItemPolicy policy)
+            {
+                File = file;
+                Data = data;
+                Policy = policy;
+            }
+
+            #endregion
+
+            #region Properties
+
+            public byte[] Data { get; }
+            public FileInfo File { get; }
+
+            #endregion
+
+            #region ICacheEntry Members
+
+            public CacheItemPolicy Policy { get; }
+
+            public CacheItem GetCacheItem(IDataSerializer serializer)
+            {
+                lock (this)
+                {
+                    return _cacheItem ?? (_cacheItem = serializer.DeserializeItem(Data));
+                }
+            }
+
+            #endregion
         }
 
         #endregion

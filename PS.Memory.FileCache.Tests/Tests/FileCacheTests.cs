@@ -20,17 +20,12 @@ namespace PS.Runtime.Caching.Tests
             var cacheKey = "test";
             var expectedValue = 42;
 
-            var cleanupSettings = new CleanupSettings
+            var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            using (var repository = new DefaultRepository(root, cleanupSettings: CleanupSettings.Infinite))
             {
-                GuarantyFileLifetimePeriod = null,
-                CleanupPeriod = TimeSpan.MaxValue
-            };
+                var cache1 = new FileCache(repository);
+                var cache2 = new FileCache(repository);
 
-            var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
-
-            using (var cache1 = new FileCache(repository: repository, cleanupSettings: cleanupSettings))
-            using (var cache2 = new FileCache(repository: repository, cleanupSettings: cleanupSettings))
-            {
                 var policy = new CacheItemPolicy
                 {
                     AbsoluteExpiration = DateTimeOffset.Now + TimeSpan.FromSeconds(1)
@@ -63,11 +58,11 @@ namespace PS.Runtime.Caching.Tests
                 items.Add(i, Guid.NewGuid());
             }
 
-            var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
-
-            using (var cache1 = new FileCache(repository: repository))
-            using (var cache2 = new FileCache(repository: repository))
+            using (var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))))
             {
+                var cache1 = new FileCache(repository);
+                var cache2 = new FileCache(repository);
+
                 var tasks = new List<Task>();
                 for (var i = 0; i < 20; i++)
                 {
@@ -113,11 +108,11 @@ namespace PS.Runtime.Caching.Tests
                 items.Add(i, Guid.NewGuid());
             }
 
-            var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
-
-            using (var cache1 = new FileCache(repository: repository))
-            using (var cache2 = new FileCache(repository: repository))
+            using (var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))))
             {
+                var cache1 = new FileCache(repository);
+                var cache2 = new FileCache(repository);
+
                 var tasks = new List<Task>();
                 for (var i = 0; i < 20; i++)
                 {
@@ -154,17 +149,12 @@ namespace PS.Runtime.Caching.Tests
             var cacheKey = "test";
             var expectedValue = 42;
 
-            var cleanupSettings = new CleanupSettings
+            var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            using (var repository = new DefaultRepository(root, cleanupSettings: CleanupSettings.Infinite))
             {
-                GuarantyFileLifetimePeriod = null,
-                CleanupPeriod = TimeSpan.MaxValue
-            };
+                var cache1 = new FileCache(repository);
+                var cache2 = new FileCache(repository);
 
-            var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
-
-            using (var cache1 = new FileCache(repository: repository, cleanupSettings: cleanupSettings))
-            using (var cache2 = new FileCache(repository: repository, cleanupSettings: cleanupSettings))
-            {
                 var policy = new CacheItemPolicy
                 {
                     Priority = CacheItemPriority.NotRemovable,
@@ -194,17 +184,12 @@ namespace PS.Runtime.Caching.Tests
             var cacheKey = "test";
             var expectedValue = 42;
 
-            var cleanupSettings = new CleanupSettings
+            var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            using (var repository = new DefaultRepository(root, cleanupSettings: CleanupSettings.Infinite))
             {
-                GuarantyFileLifetimePeriod = null,
-                CleanupPeriod = TimeSpan.MaxValue
-            };
+                var cache1 = new FileCache(repository);
+                var cache2 = new FileCache(repository);
 
-            var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
-
-            using (var cache1 = new FileCache(repository: repository, cleanupSettings: cleanupSettings))
-            using (var cache2 = new FileCache(repository: repository, cleanupSettings: cleanupSettings))
-            {
                 var policy = new CacheItemPolicy
                 {
                     Priority = CacheItemPriority.NotRemovable,
@@ -234,17 +219,12 @@ namespace PS.Runtime.Caching.Tests
             var cacheKey = "test";
             var expectedValue = 42;
 
-            var cleanupSettings = new CleanupSettings
+            var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            using (var repository = new DefaultRepository(root, cleanupSettings: CleanupSettings.Infinite))
             {
-                GuarantyFileLifetimePeriod = null,
-                CleanupPeriod = TimeSpan.MaxValue
-            };
+                var cache1 = new FileCache(repository);
+                var cache2 = new FileCache(repository);
 
-            var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
-
-            using (var cache1 = new FileCache(repository: repository, cleanupSettings: cleanupSettings))
-            using (var cache2 = new FileCache(repository: repository, cleanupSettings: cleanupSettings))
-            {
                 var policy = new CacheItemPolicy
                 {
                     SlidingExpiration = TimeSpan.FromSeconds(2)

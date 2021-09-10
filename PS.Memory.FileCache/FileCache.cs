@@ -2,55 +2,24 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.Caching;
-using System.Threading;
 using PS.Runtime.Caching.API;
 using PS.Runtime.Caching.Default;
 using PS.Runtime.Caching.Extensions;
 
 namespace PS.Runtime.Caching
 {
-    public class FileCache : ObjectCache,
-                             IDisposable
+    public class FileCache : ObjectCache
     {
-        #region Static members
-
-        private static DateTime CalculateExpiration(CacheItemPolicy policy, DateTime? lastAccessTime)
-        {
-            if (policy.Priority == CacheItemPriority.NotRemovable)
-            {
-                return InfiniteAbsoluteExpiration.UtcDateTime;
-            }
-
-            if (policy.AbsoluteExpiration != InfiniteAbsoluteExpiration)
-            {
-                return policy.AbsoluteExpiration.UtcDateTime;
-            }
-
-            if (lastAccessTime.HasValue && policy.SlidingExpiration != NoSlidingExpiration)
-            {
-                return lastAccessTime.Value + policy.SlidingExpiration;
-            }
-
-            return InfiniteAbsoluteExpiration.UtcDateTime;
-        }
-
-        #endregion
-
-        private readonly TimeSpan? _cleanupPeriod;
-        private readonly TimeSpan? _guarantyFileLifetimePeriod;
         private readonly IMemoryCacheFacade _memoryCacheFacade;
-
         private readonly IRepository _repository;
         private readonly IDataSerializer _serializer;
-        private readonly Timer _timer;
 
         #region Constructors
 
-        public FileCache(string name = null,
-                         IRepository repository = null,
+        public FileCache(IRepository repository,
+                         string name = null,
                          IDataSerializer serializer = null,
-                         IMemoryCacheFacade memoryCacheFacade = null,
-                         CleanupSettings cleanupSettings = null)
+                         IMemoryCacheFacade memoryCacheFacade = null)
         {
             Name = name;
 
@@ -62,16 +31,6 @@ namespace PS.Runtime.Caching
             _repository = repository ?? new DefaultRepository();
             _memoryCacheFacade = memoryCacheFacade ?? new DefaultMemoryCacheFacade();
             _serializer = serializer ?? new DefaultDataSerializer();
-
-            cleanupSettings = cleanupSettings ?? new CleanupSettings();
-
-            _cleanupPeriod = cleanupSettings.CleanupPeriod;
-            _guarantyFileLifetimePeriod = cleanupSettings.GuarantyFileLifetimePeriod;
-
-            if (_cleanupPeriod.HasValue)
-            {
-                _timer = new Timer(CleanupTimer, null, TimeSpan.Zero, TimeSpan.Zero);
-            }
         }
 
         #endregion
@@ -94,18 +53,18 @@ namespace PS.Runtime.Caching
 
         public override CacheItem GetCacheItem(string key, string regionName = null)
         {
-            if (_memoryCacheFacade.Get(key, regionName) is InternalCacheItem item)
+            if (_memoryCacheFacade.Get(key, regionName) is ICacheEntry entry)
             {
                 //Update access time only for items with sliding expiration
-                if (item.Policy.SlidingExpiration != NoSlidingExpiration)
+                if (entry.Policy.SlidingExpiration != NoSlidingExpiration)
                 {
-                    _repository.UpdateLastAccessTime(key, regionName, item.Origin, DateTime.UtcNow);
+                    _repository.UpdateAccessTime(entry, DateTime.UtcNow);
                 }
 
-                return item.CacheItem;
+                return entry.GetCacheItem(_serializer);
             }
 
-            return GetInternalCacheItem(key, regionName)?.CacheItem;
+            return GetCacheEntry(key, regionName)?.GetCacheItem(_serializer);
         }
 
         protected override IEnumerator<KeyValuePair<string, object>> GetEnumerator()
@@ -187,47 +146,28 @@ namespace PS.Runtime.Caching
         public override void Set(CacheItem item, CacheItemPolicy policy)
         {
             var now = DateTime.UtcNow;
-            var origin = FileEntry.CreateFilename(now, policy);
-            var internalCacheItem = new InternalCacheItem
-            {
-                CacheItem = item,
-                Policy = policy,
-                Origin = origin
-            };
-
             var data = _serializer.SerializeItem(item);
-
-            _repository.WriteFile(item.Key, item.RegionName, origin, data);
+            var entry = _repository.Write(item.Key, item.RegionName, data, policy);
 
             if (policy.SlidingExpiration != NoSlidingExpiration)
             {
-                _repository.UpdateLastAccessTime(item.Key, item.RegionName, origin, now);
+                _repository.UpdateAccessTime(entry, now);
             }
 
-            var expiration = CalculateExpiration(policy, now);
-            _memoryCacheFacade.Put(item.Key, item.RegionName, internalCacheItem, expiration);
+            var expiration = policy.CalculateExpiration(now);
+            _memoryCacheFacade.Put(item.Key, item.RegionName, entry, expiration);
         }
 
         public override object Remove(string key, string regionName = null)
         {
-            var existingItem = GetInternalCacheItem(key, regionName);
-            if (existingItem == null || existingItem.Policy.Priority == CacheItemPriority.NotRemovable) return null;
+            var entry = GetCacheEntry(key, regionName);
+            if (entry == null || entry.Policy.Priority == CacheItemPriority.NotRemovable) return null;
 
-            _repository.MarkAsDeleted(key, regionName, existingItem.Origin);
+            _repository.Delete(entry);
 
             _memoryCacheFacade.Remove(key, regionName);
 
-            return existingItem.CacheItem.Value;
-        }
-
-        #endregion
-
-        #region IDisposable Members
-
-        public void Dispose()
-        {
-            _timer?.Dispose();
-            Cleanup();
+            return entry.GetCacheItem(_serializer).Value;
         }
 
         #endregion
@@ -235,46 +175,9 @@ namespace PS.Runtime.Caching
         #region Members
 
         /// <summary>
-        ///     Cleanups saved files
-        /// </summary>
-        public void Cleanup()
-        {
-            try
-            {
-                var now = DateTime.UtcNow;
-                var regions = _repository.EnumerateRegions();
-                var guarantyFileLifetimePeriod = _guarantyFileLifetimePeriod ?? TimeSpan.Zero;
-                foreach (var region in regions)
-                {
-                    foreach (var key in _repository.EnumerateKeys(region))
-                    {
-                        var files = ScanForFiles(key, region);
-                        var entry = SelectValidCacheEntry(key, region, files, now);
-                        var obsoleteFiles = files.Except(new[] { entry })
-                                                 .Where(f =>
-                                                 {
-                                                     var lastAccessTime = _repository.GetLastAccessTime(key, region, f.File);
-                                                     return lastAccessTime + guarantyFileLifetimePeriod < now;
-                                                 })
-                                                 .Select(f => f.File)
-                                                 .ToList();
-                        if (obsoleteFiles.Any())
-                        {
-                            _repository.DeleteFiles(key, region, obsoleteFiles);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-                //Nothing
-            }
-        }
-
-        /// <summary>
         ///     Marks all cached items as deleted
         /// </summary>
-        public void Reset()
+        public void Clear()
         {
             var regions = _repository.EnumerateRegions();
 
@@ -287,46 +190,27 @@ namespace PS.Runtime.Caching
             }
         }
 
-        private void CleanupTimer(object state)
-        {
-            Cleanup();
-
-            // ReSharper disable once PossibleInvalidOperationException
-            _timer.Change(_cleanupPeriod.Value, TimeSpan.Zero);
-        }
-
-        private InternalCacheItem GetInternalCacheItem(string key, string regionName)
+        private ICacheEntry GetCacheEntry(string key, string regionName)
         {
             try
             {
                 var now = DateTime.UtcNow;
-                var files = ScanForFiles(key, regionName);
-                var entry = SelectValidCacheEntry(key, regionName, files, now);
-
+                var entry = _repository.Read(key, regionName, now);
                 if (entry == null)
                 {
-                    //Entry cannot be created in current state
+                    //Entry is not exist or expired
                     return null;
                 }
 
-                var data = _repository.ReadFile(key, regionName, entry.File);
-                var cacheItem = _serializer.DeserializeItem(data);
-
                 if (entry.Policy.SlidingExpiration != NoSlidingExpiration)
                 {
-                    _repository.UpdateLastAccessTime(key, regionName, entry.File, now);
+                    _repository.UpdateAccessTime(entry, now);
                 }
 
-                var expiration = CalculateExpiration(entry.Policy, now);
-                var internalCacheItem = new InternalCacheItem
-                {
-                    CacheItem = cacheItem,
-                    Policy = entry.Policy,
-                    Origin = entry.File
-                };
-                _memoryCacheFacade.Put(key, regionName, internalCacheItem, expiration);
+                var expiration = entry.Policy.CalculateExpiration(now);
+                _memoryCacheFacade.Put(key, regionName, entry, expiration);
 
-                return internalCacheItem;
+                return entry;
             }
             catch
             {
@@ -337,43 +221,6 @@ namespace PS.Runtime.Caching
         private IEnumerable<string> GetKeys(string regionName)
         {
             return _repository.EnumerateKeys(regionName);
-        }
-
-        private IReadOnlyList<FileEntry> ScanForFiles(string key, string regionName)
-        {
-            return _repository.EnumerateFiles(key, regionName, "*." + FileEntry.CacheExtension).Select(FileEntry.Parse).ToList();
-        }
-
-        private FileEntry SelectValidCacheEntry(string key, string regionName, IReadOnlyList<FileEntry> files, DateTime now)
-        {
-            var entry = files.OrderByDescending(f => f.Timestamp).FirstOrDefault();
-            if (entry == null)
-            {
-                //Data file missed
-                return null;
-            }
-
-            if (_repository.IsDeleted(key, regionName, entry.File))
-            {
-                //Data file marked as deleted
-                return null;
-            }
-
-            DateTime? lastAccessTime = null;
-
-            if (entry.Policy.SlidingExpiration != NoSlidingExpiration)
-            {
-                lastAccessTime = _repository.GetLastAccessTime(key, regionName, entry.File);
-            }
-
-            var expirationTime = CalculateExpiration(entry.Policy, lastAccessTime);
-            if (expirationTime < now)
-            {
-                //Item expired
-                return null;
-            }
-
-            return entry;
         }
 
         #endregion

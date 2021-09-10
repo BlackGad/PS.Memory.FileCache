@@ -27,10 +27,9 @@ Generic usage is the same as [MemoryCache](https://docs.microsoft.com/en-us/dotn
 To setup cache location use [DefaultRepository](https://github.com/BlackGad/PS.Memory.FileCache/blob/master/PS.Memory.FileCache/Default/DefaultRepository.cs) as [FileCache](https://github.com/BlackGad/PS.Memory.FileCache/blob/master/PS.Memory.FileCache/FileCache.cs) constructor parameter. Default location is `<app folder>\Cache\`
 
 ```csharp
-var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
-
-using (var cache = new FileCache(repository: repository))
+using (var repository = new DefaultRepository(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))))
 {
+    var cache = new FileCache(repository))
    //...
 }
 ```
@@ -41,7 +40,38 @@ Current implementation has several logically separated parts that can be changed
 
 ## IRepository
 
-Encapsulates all IO operations. [DefaultRepository](https://github.com/BlackGad/PS.Memory.FileCache/blob/master/PS.Memory.FileCache/Default/DefaultRepository.cs) supports cache location change via constructor parameter. All methods in default implementation are virtual so can be overridden.
+Encapsulates all IO operations. Library contains default implementation [DefaultRepository](https://github.com/BlackGad/PS.Memory.FileCache/blob/master/PS.Memory.FileCache/Default/DefaultRepository.cs). All methods in default implementation are virtual so can be overridden. 
+
+### Cache location
+
+Cache location can be changed via constructor parameter.
+
+### Key and Region name sanitizing
+
+To enable/disable cache keys and regions sanitizing use **sanitizeNames** constructor parameter. Default value is **true**.
+
+### Cleanup settings
+
+Default implementation supports automatic repository cleaning within a fixed period of time (2 seconds by default) on instance dispose and via manual `DefaultRepository.Cleanup()` call. 
+Clean operation means delete all files that were marked as deleted or expired.
+
+To prevent file access issues there is delay options (5 seconds by default) which means file is allowed for deletion only after specified period.
+
+```csharp
+var cleanupSettings = new CleanupSettings //Default settings defined in static CleanupSettings.Default property
+{
+    GuarantyFileLifetimePeriod = TimeSpan.FromSeconds(5),
+    CleanupPeriod = TimeSpan.FromSeconds(2)
+};
+
+using (var repository = new DefaultRepository(cleanupSettings: cleanupSettings))
+{
+   var cache = new FileCache(repository)
+   //...
+}
+```
+
+Also `CleanupSettings.Infinite` static property can be used to **disable** cleanup functionality.
 
 ## IMemoryCacheFacade
 
@@ -71,25 +101,5 @@ class JsonDataSerializer : DefaultDataSerializer
         var json = JsonConvert.SerializeObject(data);
         return Encoding.UTF8.GetBytes(json);
     }
-}
-```
-
-## CleanupSettings
-
-File cache supports automatic repository cleaning with fixed period of time (2 seconds by default) on instance dispose and via manual `FileCache.Cleanup()` call. 
-Clean operation means delete all files that were marked as deleted or expired.
-
-To prevent files access issues there is delay options (5 seconds by default) which means file is allowed for deletion only after specified period.
-
-```csharp
-var cleanupSettings = new CleanupSettings
-{
-    GuarantyFileLifetimePeriod = null,
-    CleanupPeriod = TimeSpan.MaxValue
-};
-
-using (var cache1 = new FileCache(cleanupSettings: cleanupSettings))
-{
-   //...
 }
 ```
