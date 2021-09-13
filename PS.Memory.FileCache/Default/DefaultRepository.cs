@@ -246,37 +246,35 @@ namespace PS.Runtime.Caching.Default
                                                  .ToList();
 
                             var mostRecentFile = files.FirstOrDefault();
-                            if (mostRecentFile == null)
+                            if (mostRecentFile != null)
                             {
-                                continue;
-                            }
+                                var obsoleteFiles = files.Skip(1).ToList();
 
-                            var obsoleteFiles = files.Skip(1).ToList();
-
-                            var file = new FileInfo(mostRecentFile);
-                            if (file.Attributes.HasFlag(FileAttributes.Offline))
-                            {
-                                obsoleteFiles.Add(file.FullName);
-                            }
-
-                            var policy = DeserializeCacheItemPolicy(file.Name);
-
-                            var lastAccessTime = policy.SlidingExpiration != ObjectCache.NoSlidingExpiration
-                                ? file.LastAccessTimeUtc
-                                : now;
-
-                            var expirationTime = policy.CalculateExpiration(lastAccessTime);
-                            if (expirationTime + guarantyFileLifetimePeriod < now)
-                            {
-                                //Item expired
-                                obsoleteFiles.Add(file.FullName);
-                            }
-
-                            if (obsoleteFiles.Any())
-                            {
-                                foreach (var obsoleteFile in obsoleteFiles)
+                                var file = new FileInfo(mostRecentFile);
+                                if (file.Attributes.HasFlag(FileAttributes.Offline))
                                 {
-                                    CleanupFile(obsoleteFile);
+                                    obsoleteFiles.Add(file.FullName);
+                                }
+
+                                var policy = DeserializeCacheItemPolicy(file.Name);
+
+                                var lastAccessTime = policy.SlidingExpiration != ObjectCache.NoSlidingExpiration
+                                    ? file.LastAccessTimeUtc
+                                    : now;
+
+                                var expirationTime = policy.CalculateExpiration(lastAccessTime);
+                                if (expirationTime < DateTime.MaxValue && expirationTime + guarantyFileLifetimePeriod < now)
+                                {
+                                    //Item expired
+                                    obsoleteFiles.Add(file.FullName);
+                                }
+
+                                if (obsoleteFiles.Any())
+                                {
+                                    foreach (var obsoleteFile in obsoleteFiles)
+                                    {
+                                        CleanupFile(obsoleteFile);
+                                    }
                                 }
                             }
 
@@ -311,8 +309,8 @@ namespace PS.Runtime.Caching.Default
         {
             try
             {
-                var remainingFiles = Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly);
-                if (!remainingFiles.Any())
+                var remainingEntries = Directory.EnumerateFileSystemEntries(directory, "*", SearchOption.TopDirectoryOnly);
+                if (!remainingEntries.Any())
                 {
                     Directory.Delete(directory);
                 }
