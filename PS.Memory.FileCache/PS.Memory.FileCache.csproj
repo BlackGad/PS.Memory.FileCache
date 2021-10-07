@@ -8,6 +8,7 @@
     <Company>Volodymyr Shkolka</Company>
     <Product>PS Framework</Product>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageLicenseFile>README.md</PackageLicenseFile>
     <PackageProjectUrl>https://github.com/BlackGad/PS.Memory.FileCache</PackageProjectUrl>
     <RepositoryUrl>https://github.com/BlackGad/PS.Memory.FileCache</RepositoryUrl>
     <RepositoryType>github</RepositoryType>
